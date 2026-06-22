@@ -14,6 +14,8 @@ _TMPL_DIR = os.path.join(_HERE, "..", "assets", "templates")
 _SKIP = cv2.imread(os.path.join(_TMPL_DIR, "skip_badge.png"))
 _VOICE_NONE = cv2.imread(os.path.join(_TMPL_DIR, "voice_none.png"))
 _LIST_BAR = cv2.imread(os.path.join(_TMPL_DIR, "list_bar.png"))
+_CHAR_SELECT = cv2.imread(os.path.join(_TMPL_DIR, "char_select.png"))
+_UNLOCK = cv2.imread(os.path.join(_TMPL_DIR, "unlock_dialog.png"))
 
 # 버튼 탐색 영역(좌측 캐릭터·상단바·우측툴바 제외). 안드로이드 1920x1080 기준.
 BTN_REGION = (440, 150, 1850, 1060)  # x0,y0,x1,y1
@@ -56,6 +58,19 @@ def find_skip(img: np.ndarray, thr: float = 0.80) -> list[tuple[int, int, float]
         if all(abs(x - kx) > 50 or abs(y - ky) > 50 for kx, ky, _ in keep):
             keep.append((x + tw // 2, y + th // 2, s))
     return keep
+
+
+def is_unlock_dialog(img: np.ndarray, thr: float = 0.85) -> bool:
+    """'「サイドストーリー○編」を解放しますか?' 해제(재화소모) 다이얼로그인지.
+    前編 읽고 나면 잠긴 後編 해제를 권유하며 뜸 → 연타로 잘못 확정하면 보석 소모. 감지해 キャンセル해야 함."""
+    res = cv2.matchTemplate(img, _UNLOCK, cv2.TM_CCOEFF_NORMED)
+    return float(cv2.minMaxLoc(res)[1]) >= thr
+
+
+def is_char_select(img: np.ndarray, thr: float = 0.85) -> bool:
+    """캐릭터 선택 화면인지 — 하단 'キャラクターを選択してください' 텍스트로 판정."""
+    res = cv2.matchTemplate(img, _CHAR_SELECT, cv2.TM_CCOEFF_NORMED)
+    return float(cv2.minMaxLoc(res)[1]) >= thr
 
 
 def find_voice_none(img: np.ndarray, thr: float = 0.85) -> tuple[int, int] | None:
