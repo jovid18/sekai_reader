@@ -13,6 +13,7 @@ _HERE = os.path.dirname(__file__)
 _TMPL_DIR = os.path.join(_HERE, "..", "assets", "templates")
 _SKIP = cv2.imread(os.path.join(_TMPL_DIR, "skip_badge.png"))
 _VOICE_NONE = cv2.imread(os.path.join(_TMPL_DIR, "voice_none.png"))
+_LIST_BAR = cv2.imread(os.path.join(_TMPL_DIR, "list_bar.png"))
 
 # 버튼 탐색 영역(좌측 캐릭터·상단바·우측툴바 제외). 안드로이드 1920x1080 기준.
 BTN_REGION = (440, 150, 1850, 1060)  # x0,y0,x1,y1
@@ -37,8 +38,11 @@ def count_buttons(img: np.ndarray) -> int:
     return len(button_boxes(img))
 
 
-def is_list_screen(img: np.ndarray) -> bool:
-    return count_buttons(img) >= 3
+def is_list_screen(img: np.ndarray, thr: float = 0.85) -> bool:
+    """에피소드 목록 화면인지 — 상단 정렬바('デフォルト') 템플릿으로 판정.
+    스크롤·잠김 여부와 무관하게 항상 떠 있어 흰버튼 개수보다 견고. 재생/다이얼로그에선 없음."""
+    res = cv2.matchTemplate(img, _LIST_BAR, cv2.TM_CCOEFF_NORMED)
+    return float(cv2.minMaxLoc(res)[1]) >= thr
 
 
 def find_skip(img: np.ndarray, thr: float = 0.80) -> list[tuple[int, int, float]]:
