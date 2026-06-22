@@ -4,11 +4,9 @@
 변환해 **Quartz 마우스 이벤트**로 클릭한다(cliclick은 클릭당 ~120ms로 느려 교체).
 창 위치/크기는 매번 osascript로 읽으므로 창을 옮겨도 동작한다.
 
-전제: BlueStacks 창은 '논리 포인트' 기준. 창 안에서 게임 렌더 영역은
-  - 상단 타이틀바 ~TITLE_PT pt
-  - 우측 툴바       ~RIGHT_PT pt
-  - 좌/하단은 꽉 참(flush)
-2026-06-22 실측 보정으로 도출(SPEC 3.6). 창을 리사이즈해도 크롬이 고정 pt면 유지된다.
+게임은 창 안에 **16:9 레터박스로 중앙 배치**된다(2026-06-23 풀스크린/최대화에서 재보정, 매칭0.996).
+창이 16:9보다 세로로 길면 상/하 여백, 가로로 길면 좌/우 여백이 생긴다. 창 크기에서 자동 계산하므로
+창 이동·리사이즈·전체화면 어디서나 동작한다. (이전 윈도우모드의 타이틀바+우측툴바 가정은 폐기)
 """
 from __future__ import annotations
 import subprocess
@@ -28,8 +26,7 @@ def _click(x, y, hold: float = 0.012):
     _post(Quartz.kCGEventLeftMouseUp, x, y)
 
 WINDOW_NAME = "BlueStacks Air"
-TITLE_PT = 32     # 상단 타이틀바 높이(pt)
-RIGHT_PT = 31     # 우측 툴바 너비(pt)
+ASPECT = ANDROID_W / ANDROID_H   # 16:9 게임 렌더 비율
 
 _GEOM_AS = (
     'tell application "System Events" to tell process "BlueStacks" '
@@ -49,12 +46,22 @@ def window_geometry() -> tuple[int, int, int, int]:
     return tuple(nums)  # type: ignore[return-value]
 
 
+def game_rect(geom: tuple[int, int, int, int] | None = None) -> tuple[float, float, float, float]:
+    """창 안에서 16:9 게임 렌더 영역 (x0,y0,w,h) in pt (레터박스 중앙배치)."""
+    wx, wy, ww, wh = geom or window_geometry()
+    if ww / wh >= ASPECT:           # 창이 더 가로로 김 → 좌우 여백(필러박스)
+        gh = wh; gw = wh * ASPECT
+    else:                           # 창이 더 세로로 김 → 상하 여백(레터박스)
+        gw = ww; gh = ww / ASPECT
+    return wx + (ww - gw) / 2, wy + (wh - gh) / 2, gw, gh
+
+
 def android_to_screen(ax: float, ay: float,
                       geom: tuple[int, int, int, int] | None = None) -> tuple[int, int]:
     """안드로이드 픽셀(ax,ay) -> macOS 클릭 좌표(pt)."""
-    wx, wy, ww, wh = geom or window_geometry()
-    cx = wx + (ax / ANDROID_W) * (ww - RIGHT_PT)
-    cy = wy + TITLE_PT + (ay / ANDROID_H) * (wh - TITLE_PT)
+    gx0, gy0, gw, gh = game_rect(geom)
+    cx = gx0 + (ax / ANDROID_W) * gw
+    cy = gy0 + (ay / ANDROID_H) * gh
     return int(round(cx)), int(round(cy))
 
 

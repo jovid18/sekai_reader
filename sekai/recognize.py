@@ -83,27 +83,16 @@ def find_voice_none(img: np.ndarray, thr: float = 0.85) -> tuple[int, int] | Non
     return (loc[0] + tw // 2, loc[1] + th // 2)
 
 
-def skip_targets(img: np.ndarray) -> list[tuple[int, int]]:
-    """미열람(SKIP) 버튼들의 클릭 중심좌표 [(cx,cy), ...] (안드로이드 px).
-    SKIP 뱃지는 버튼 우상단에 걸쳐있으므로, 뱃지에 가장 가까운(뱃지가 우상단에 얹힌) 흰 버튼을 찾아
-    그 중심을 반환. 매칭 버튼 없으면 뱃지 기준 추정 오프셋 사용."""
-    boxes = button_boxes(img)
-    targets = []
-    for bx, by, _ in find_skip(img):
-        best, bestd = None, 1e9
-        for x, y, w, h in boxes:
-            # 뱃지 중심이 버튼의 우상단 부근(버튼 박스의 위쪽 약간, 우측 절반)에 있어야 함
-            cxr, cyr = x + w * 0.5, y + h * 0.5
-            if not (x - 20 <= bx <= x + w + 30 and y - 50 <= by <= y + h):
-                continue
-            d = abs(bx - (x + w)) + abs(by - y)  # 뱃지~버튼 우상단 거리
-            if d < bestd:
-                best, bestd = (int(cxr), int(cyr)), d
-        if best:
-            targets.append(best)
-        else:
-            targets.append((bx - 90, by + 22))  # 폴백 추정
-    return targets
+# SKIP 뱃지 중심 → 그 뱃지가 얹힌 前編/後編 버튼 중심까지의 고정 오프셋(안드로이드 px).
+# 뱃지는 항상 버튼의 '우상단 모서리'에 붙으므로 좌하로 이동하면 버튼 위에 떨어진다(좌/우 칼럼 공통, 실측).
+_SKIP_DX, _SKIP_DY = 84, 26
+
+
+def skip_targets(img: np.ndarray, thr: float = 0.88) -> list[tuple[int, int]]:
+    """미열람(SKIP) 버튼들의 클릭 좌표 [(cx,cy), ...] (안드로이드 px).
+    SKIP 뱃지(초록)를 검출하고 고정 오프셋으로 해당 버튼 중심을 계산. button_boxes는
+    썸네일/Lv배지 등 가짜 흰영역이 섞여 불안정하므로 쓰지 않는다."""
+    return [(cx - _SKIP_DX, cy + _SKIP_DY) for cx, cy, _ in find_skip(img, thr)]
 
 
 if __name__ == "__main__":

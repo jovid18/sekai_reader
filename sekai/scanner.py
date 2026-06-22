@@ -34,6 +34,19 @@ def screens_equal(a: np.ndarray, b: np.ndarray, thr: float = 6.0) -> bool:
     return float(np.mean((_sig(a) - _sig(b)) ** 2)) < thr
 
 
+def grab_settled(tries: int = 8) -> np.ndarray:
+    """화면이 멈출 때까지(연속 2프레임 동일) 기다린 뒤 그 프레임 반환.
+    스크롤 관성으로 움직이는 중에 좌표를 잡아 탭하면 빗나가므로, 탭 전 반드시 안정화한다."""
+    prev = capture.grab()
+    for _ in range(tries):
+        time.sleep(0.22)
+        cur = capture.grab()
+        if screens_equal(prev, cur):
+            return cur
+        prev = cur
+    return prev
+
+
 def scroll_to_top(geom, log=print, max_swipes: int = 25) -> np.ndarray:
     prev = capture.grab()
     for _ in range(max_swipes):
@@ -47,42 +60,51 @@ def scroll_to_top(geom, log=print, max_swipes: int = 25) -> np.ndarray:
     return prev
 
 
-def _first_skip_scrolling(geom, log):
-    """맨 위로 올린 뒤 아래로 스크롤하며 첫 SKIP 타겟을 찾는다. 바닥까지 없으면 None."""
-    img = scroll_to_top(geom, log)
-    for _ in range(40):
-        t = rec.skip_targets(img)
-        if t:
-            return t[0]
-        prev = img
-        _scroll_down(geom)
-        img = capture.grab()
-        if screens_equal(prev, img):   # 더 못 내려감 = 바닥
-            t = rec.skip_targets(img)
-            return t[0] if t else None
-    return None
+# SKIP 버튼이 이 y(안드로이드 px)보다 아래면 화면 가장자리라 탭이 빗나가기 쉽다 →
+# 한 칸 스크롤해 중앙으로 끌어올린 뒤 탭. 읽을 수 있는 SKIP 아래엔 항상 잠긴 에피소드가 있어
+# (=더 스크롤할 여지가 있어) 끌어올리기가 거의 항상 가능하다.
+SAFE_MAX_Y = 720
 
 
 def scan_character(geom=None, log=print, max_episodes: int = 80) -> int:
-    """현재 캐릭터의 SKIP을 전부 읽어 제거. 읽은 편수 반환."""
+    """현재 캐릭터의 SKIP을 전부 읽어 제거. 읽은 편수 반환.
+
+    한 방향 sweep: 스토리를 읽고 목록으로 돌아오면 스크롤 위치가 그대로 유지되므로,
+    매번 맨 위로 올리지 않고 '현재 뷰에서 남은 SKIP을 바로 처리 → 없으면 아래로 한 칸' 한다.
+    (가장자리 y>SAFE_MAX_Y SKIP은 한 칸 스크롤해 중앙으로 끌어올린 뒤 탭)
+    """
     geom = geom or inp.window_geometry()
+    scroll_to_top(geom, log)          # 시작은 맨 위에서(위쪽 SKIP 누락 방지)
     done = 0
     fails = 0
     while done < max_episodes:
-        tgt = _first_skip_scrolling(geom, log)
-        if tgt is None:
+        img = grab_settled()
+        ts = sorted(rec.skip_targets(img), key=lambda t: t[1])
+        safe = [t for t in ts if t[1] <= SAFE_MAX_Y]
+        if safe:
+            tgt = safe[0]
+            log(f"[{done+1}] SKIP 처리 @ {tgt}")
+            if reader.read_one(tgt, geom=geom, log=log):
+                done += 1
+                fails = 0
+            else:
+                fails += 1
+                log(f"⚠️ read_one 실패 (연속 {fails})")
+                if fails >= 4:
+                    log("⚠️ 연속 실패 4회 — 중단(미처리 SKIP 남았을 수 있음)")
+                    break
+            continue   # 위치 유지됨 → 같은 뷰 재스캔(불필요한 맨위 복귀 안 함)
+        # 현재 뷰에 안전한 SKIP 없음 → 아래로 한 칸 (가장자리 SKIP은 끌어올려짐)
+        prev = img
+        _scroll_down(geom)
+        nxt = grab_settled()
+        if screens_equal(prev, nxt):       # 더 못 내려감 = 바닥
+            if ts:                         # 바닥인데 가장자리 SKIP이 남아있으면 best-effort
+                log(f"[{done+1}] (바닥) SKIP 처리 @ {ts[0]}")
+                if reader.read_one(ts[0], geom=geom, log=log):
+                    done += 1; fails = 0; continue
             log(f"SKIP 없음 — 캐릭터 완료 (읽음 {done}편)")
             break
-        log(f"[{done+1}] SKIP 처리 @ {tgt}")
-        if reader.read_one(tgt, geom=geom, log=log):
-            done += 1
-            fails = 0
-        else:
-            fails += 1
-            log(f"⚠️ read_one 실패 (연속 {fails})")
-            if fails >= 3:
-                log("연속 실패 3회 — 중단")
-                break
     return done
 
 
