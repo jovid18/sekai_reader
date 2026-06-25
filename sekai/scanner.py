@@ -1,8 +1,16 @@
 """순회 오케스트레이션 (SPEC 로드맵 5).
 
-scan_character(): 현재 캐릭터의 에피소드 목록을 맨 위부터 스크롤하며 SKIP(미열람)을 전부 읽어 제거.
-- 목록은 길어 스크롤 필요. 스크롤은 macOS 드래그(input.swipe), 바닥은 '스크롤해도 화면 안 변함'으로 감지.
-- read_one 후 스크롤 위치가 바뀔 수 있어, 매번 맨 위로 올린 뒤 첫 SKIP을 찾아 읽는다(결정적).
+scan_character(): 현재 캐릭터의 에피소드 목록을 맨 위부터 훑으며 SKIP(미열람)을 전부 읽어 제거.
+- 목록은 길어 스크롤 필요. 스크롤은 macOS 드래그(input.swipe), 좌/우 2열 + 본인/他メンバー 2탭 구조.
+
+### 2026-06-26 견고화 (흩어진 잔여 SKIP 버그 2개 수정)
+이전 구현은 '스크롤해도 화면이 안 변하면 바닥'이라는 무이동 감지로 sweep을 끝냈는데:
+  (1) BlueStacks에 스와이프가 **간헐적으로 안 먹히면** 두 프레임이 동일 → '바닥'으로 오판 →
+      아래쪽 SKIP을 통째로 놓치고 조기 종료. (캐릭터마다 운에 따라 잔여가 흩어진 원인)
+  (2) SAFE_MAX_Y=720 이 너무 보수적 → 목록 **하단** SKIP이 관성 오버슛으로 안전 band에 못 들어와
+      영영 클릭되지 않음.
+→ (1) 무이동 감지 폐기, **가장 긴 목록도 덮는 고정 스텝 수로 결정적으로 훑음**(바닥 지나면 no-op).
+  (2) SAFE_MAX_Y 720→860 (실측: y=766·833 클릭도 정상 진입). 하단 SKIP을 그 위치에서 바로 클릭.
 """
 from __future__ import annotations
 import time
@@ -18,6 +26,14 @@ _DOWN_FROM, _DOWN_TO = (960, 760), (960, 460)    # drag up = 아래로 스크롤
 _DOWN_STEPS, _DOWN_HOLD = 8, 110                  # 느리게 → 관성 최소화
 _SETTLE = 0.7   # 스크롤 후 안정 대기
 
+# 결정적 sweep 파라미터 — 무이동 감지 대신 '가장 긴 목록도 덮는 고정 횟수'.
+TOP_SWIPES = 20     # 맨 위 복귀용 위-스와이프 횟수(무조건)
+SWEEP_STEPS = 22    # 위→아래 훑기 스텝 수(무조건). 바닥을 지나면 추가 스크롤은 무해(no-op).
+
+# SKIP 타겟 y가 이 값 이하면 그 위치에서 바로 클릭. 목록 하단 SKIP은 관성 오버슛으로
+# 좁은 안전 band에 안 들어오므로, 충분히 큰 값으로 잡아 하단에서도 직접 클릭한다(실측: y=833 정상 진입).
+SAFE_MAX_Y = 860
+
 
 def _scroll_down(geom):
     inp.swipe(*_DOWN_FROM, *_DOWN_TO, steps=_DOWN_STEPS, hold_ms=_DOWN_HOLD, geom=geom)
@@ -31,6 +47,7 @@ def _sig(img: np.ndarray) -> np.ndarray:
 
 
 def screens_equal(a: np.ndarray, b: np.ndarray, thr: float = 6.0) -> bool:
+    """두 프레임이 사실상 동일한가(실측: 실제 스크롤 시 MSE>1000, 동일 시 ~0)."""
     return float(np.mean((_sig(a) - _sig(b)) ** 2)) < thr
 
 
@@ -47,69 +64,70 @@ def grab_settled(tries: int = 8) -> np.ndarray:
     return prev
 
 
-def scroll_to_top(geom, log=print, max_swipes: int = 25) -> np.ndarray:
-    prev = capture.grab()
-    for _ in range(max_swipes):
+def scroll_to_top(geom, log=print, n: int = TOP_SWIPES) -> np.ndarray:
+    """맨 위로 복귀 — 무이동 감지에 의존하지 않고 충분한 횟수만큼 위로 스와이프한다.
+    이미 맨 위면 추가 스와이프는 무해(no-op). 단일 스와이프 불발에 강인."""
+    for _ in range(n):
         inp.swipe(*_UP_FROM, *_UP_TO, geom=geom)
-        time.sleep(_SETTLE)
-        cur = capture.grab()
-        if screens_equal(prev, cur):
-            return cur
-        prev = cur
-    log("⚠️ scroll_to_top: max_swipes 도달")
-    return prev
+        time.sleep(0.45)
+    return grab_settled()
 
 
-# SKIP 버튼이 이 y(안드로이드 px)보다 아래면 화면 가장자리라 탭이 빗나가기 쉽다 →
-# 한 칸 스크롤해 중앙으로 끌어올린 뒤 탭. 읽을 수 있는 SKIP 아래엔 항상 잠긴 에피소드가 있어
-# (=더 스크롤할 여지가 있어) 끌어올리기가 거의 항상 가능하다.
-SAFE_MAX_Y = 720
-
-
-def scan_character(geom=None, log=print, max_episodes: int = 80) -> int:
-    """현재 캐릭터의 SKIP을 전부 읽어 제거. 읽은 편수 반환.
-
-    한 방향 sweep: 스토리를 읽고 목록으로 돌아오면 스크롤 위치가 그대로 유지되므로,
-    매번 맨 위로 올리지 않고 '현재 뷰에서 남은 SKIP을 바로 처리 → 없으면 아래로 한 칸' 한다.
-    (가장자리 y>SAFE_MAX_Y SKIP은 한 칸 스크롤해 중앙으로 끌어올린 뒤 탭)
-    """
-    geom = geom or inp.window_geometry()
-    scroll_to_top(geom, log)          # 시작은 맨 위에서(위쪽 SKIP 누락 방지)
-    done = 0
-    fails = 0
-    while done < max_episodes:
+def _read_clickable_here(geom, log, st) -> None:
+    """현재 뷰의 클릭가능 SKIP을 위에서부터 모두 읽는다(읽을 때마다 재캡처). 실패 시 중단."""
+    for _ in range(12):
         img = grab_settled()
         ts = sorted(rec.skip_targets(img), key=lambda t: t[1])
-        safe = [t for t in ts if t[1] <= SAFE_MAX_Y]
-        if safe:
-            tgt = safe[0]
-            log(f"[{done+1}] SKIP 처리 @ {tgt}")
-            if reader.read_one(tgt, geom=geom, log=log):
-                done += 1
-                fails = 0
-            else:
-                fails += 1
-                log(f"⚠️ read_one 실패 (연속 {fails})")
-                if fails >= 4:
-                    log("⚠️ 연속 실패 4회 — 중단(미처리 SKIP 남았을 수 있음)")
-                    break
-            continue   # 위치 유지됨 → 같은 뷰 재스캔(불필요한 맨위 복귀 안 함)
-        # 현재 뷰에 안전한 SKIP 없음 → 아래로 한 칸 (가장자리 SKIP은 끌어올려짐)
-        prev = img
-        _scroll_down(geom)
-        nxt = grab_settled()
-        if screens_equal(prev, nxt):       # 더 못 내려감 = 바닥
-            if ts:                         # 바닥인데 가장자리 SKIP이 남아있으면 best-effort
-                log(f"[{done+1}] (바닥) SKIP 처리 @ {ts[0]}")
-                if reader.read_one(ts[0], geom=geom, log=log):
-                    done += 1; fails = 0; continue
-            log(f"SKIP 없음 — 캐릭터 완료 (읽음 {done}편)")
+        clickable = [t for t in ts if t[1] <= SAFE_MAX_Y]
+        if not clickable:
+            return
+        tgt = clickable[0]
+        st['n'] += 1
+        log(f"[{st['n']}] SKIP 처리 @ {tgt}")
+        if reader.read_one(tgt, geom=geom, log=log):
+            st['read'] += 1
+        else:
+            st['fail'] += 1
+            log(f"  ⚠️ read_one 실패 (누적 {st['fail']}) @ {tgt}")
+            return
+
+
+def scan_character(geom=None, log=print, max_episodes: int = 120) -> int:
+    """현재 캐릭터의 SKIP을 전부 읽어 제거. 읽은 편수 반환.
+
+    결정적 sweep: 맨 위에서 고정 스텝 수(SWEEP_STEPS)만큼 아래로 훑으며 각 뷰의 클릭가능 SKIP을
+    모두 읽는다. 무이동을 '바닥'으로 오판해 조기 종료하던 버그를 제거(스와이프 간헐 불발에 강인).
+    """
+    geom = geom or inp.window_geometry()
+    st = {'n': 0, 'read': 0, 'fail': 0}
+    scroll_to_top(geom, log)
+    for _ in range(SWEEP_STEPS):
+        _read_clickable_here(geom, log, st)
+        if st['fail'] >= 4:
+            log(f"⚠️ 누적 실패 {st['fail']} — 중단 (미처리 SKIP 남았을 수 있음)")
             break
-    return done
+        _scroll_down(geom)
+    _read_clickable_here(geom, log, st)   # 마지막 뷰
+    log(f"완료 — {st['read']}편 읽음")
+    return st['read']
+
+
+def count_remaining(geom=None) -> int:
+    """현재 캐릭터를 결정적으로 전체 sweep하며 동시 검출된 SKIP 최대수 반환(검증용, 조기종료 없음)."""
+    geom = geom or inp.window_geometry()
+    scroll_to_top(geom, log=lambda *a: None)
+    mx = 0
+    for _ in range(SWEEP_STEPS):
+        img = grab_settled()
+        mx = max(mx, len(rec.find_skip(img, 0.80)))
+        _scroll_down(geom)
+    img = grab_settled()
+    return max(mx, len(rec.find_skip(img, 0.80)))
 
 
 if __name__ == "__main__":
     capture.connect()
     g = inp.window_geometry()
     n = scan_character(g)
-    print(f"== 캐릭터 스캔 완료: {n}편 읽음 ==")
+    rem = count_remaining(g)
+    print(f"== 캐릭터 스캔 완료: {n}편 읽음, 검증 잔여 SKIP {rem} ==")
